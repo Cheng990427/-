@@ -1,0 +1,245 @@
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+from xgboost import plot_importance
+from matplotlib import pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error,accuracy_score
+from sklearn.model_selection import GridSearchCV,cross_val_score
+import pickle
+from sklearn import preprocessing
+from sklearn.metrics import roc_curve, auc,roc_auc_score
+import os
+import torch
+import random
+import matplotlib.pyplot as plt
+import tkinter
+import tkinter.ttk
+import time
+from sklearn.metrics import recall_score,f1_score,precision_score
+from sklearn.metrics import brier_score_loss
+from sklearn.model_selection import KFold
+import sklearn
+def set_seed(seed):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    if torch.cuda.is_available():
+       	torch.cuda.manual_seed_all(seed)
+       	torch.backends.cudnn.deterministic = True
+       	torch.backends.cudnn.benchmark = False
+set_seed(42)
+file = open(r"D:\2023-deep learning-ERP\Result_0518\XGBoost_All_Best_model.pkl","rb")
+model = pickle.load(file)
+file.close()
+
+data=pd.read_csv(r"D:\2023-deep learning-ERP\data_sham_ave_4_oscillation_100ms_0518.csv")
+y_class=dict(Attend=0,Reappraisal=1)
+data["condition"]=data["condition"].map(y_class)
+X=data.iloc[:,1:-3]
+# # 归一化 Not good
+# zscore = preprocessing.StandardScaler()
+# X = zscore.fit_transform(X)
+y=data["condition"]
+# 划分训练集和验证集
+train_X, test_X, train_y, test_y = train_test_split(X, y.values, test_size=0.2,random_state=42)
+
+model.fit(train_X, train_y, verbose=False)
+
+#得到十折交叉验证结果
+pool_auc=cross_val_score(model,train_X,train_y,cv=10,scoring="roc_auc",n_jobs=18)
+pool_acc=cross_val_score(model,train_X,train_y,cv=10,scoring="accuracy",n_jobs=18)
+
+
+def get_briver(test_y,y_prob):  
+    # 布利尔分数
+    Ytest_copy = test_y.copy()
+    Ytest_copy = pd.get_dummies(Ytest_copy)
+    for i in range(2):
+        return(brier_score_loss(Ytest_copy[i], y_prob[:, i], pos_label=i))
+from scipy.stats import norm
+
+def CI(score):
+    alpha = 0.05
+    n1, n2 = 4680/2, 4680/2
+    q1 = score / (2-score)
+    q2 = (2 * score ** 2) / (1 + score)
+    se = np.sqrt((score * (1 - score) + (n1 - 1) * (q1 - score ** 2) + (n2 -1) * (q2 - score ** 2)) / (n1 * n2))
+    confidence_level = 1 - alpha
+    z_lower, z_upper = norm.interval(confidence_level)
+    lowerb, upperb = score + z_lower * se, score + z_upper * se
+    return (lowerb, upperb)
+
+y_pred = model.predict(test_X)
+accuracy = accuracy_score(test_y,y_pred)
+recall =  recall_score(test_y,y_pred)
+precision = precision_score(test_y,y_pred)
+f1 = f1_score(test_y,y_pred)
+print('recall ratio:%3.f%%'%(recall*100))
+print('precision:%3.f%%'%(precision*100))
+print('f1 score:%3.f%%'%(f1*100)) 
+print('accuracy:%3.f%%'%(accuracy*100))
+y_prob=model.predict_proba(test_X)[:,1]
+fpr, tpr, thresholds = roc_curve(test_y, y_prob)
+Auc = auc(fpr, tpr)
+print("auc:{}".format(Auc))
+# # 对测试集进行预测
+briver=get_briver(test_y, model.predict_proba(test_X))
+acc_CI=CI(accuracy)
+precision_CI=CI(precision)
+recall_CI=CI(recall)
+f1_CI=CI(f1)
+AUC_CI=CI(Auc)
+briver_CI=CI(briver)
+print("Accuracy 95% CI:{}".format(acc_CI))
+print("Recall 95% CI:{}".format(recall_CI))
+print("precision 95% CI:{}".format(precision_CI))
+print("F1 95% CI:{}".format(f1_CI))
+print("AUC 95% CI:{}".format(AUC_CI))
+print("Briver 95% CI:{}".format(briver_CI))
+Low_CI_bound=CI(tpr)[0]
+High_CI_bound=CI(tpr)[1]
+plt.figure(figsize=(8,8))
+# plot confidence interval
+plt.plot(fpr,tpr,color="red",label="AUC = {:.2f}, 95% CI: [{:.2f}, {:.2f}]".format(Auc,AUC_CI[0],AUC_CI[1]))
+plt.fill_between(fpr,Low_CI_bound, High_CI_bound,color="red", alpha=0.2)
+plt.plot([0, 1], [0, 1], color="navy", linestyle="--")
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC curve")
+plt.legend(loc="lower right")
+output=open(r"D:\2023-deep learning-ERP\Result_0518\ROC.pkl",'wb')
+pickle.dump(fpr,output)
+pickle.dump(tpr,output)
+pickle.dump(Low_CI_bound,output)
+pickle.dump(High_CI_bound,output)
+output.close()
+figure=plt.gcf()
+figure.savefig(r"D:\2023-deep learning-ERP\Result_0518\ROC.png",dpi=1200)
+# plt.savefig('auc_roc.pdf')
+plt.show()
+
+#SHAP解释器的构建
+# #在SHAP中进行模型解释需要先创建一个explainer，
+# #SHAP支持很多类型的explainer(例如deep, gradient, kernel, linear, tree, sampling)
+#我们先以tree为例，因为它支持常用的XGB、LGB、CatBoost等树集成算法。
+import shap
+import mplcursors
+from matplotlib.widgets import Slider
+# table=pd.read_excel(r"D:\2023-deep learning-ERP\Model 3\name.xlsx")
+label=importance_full.iloc[:,1]
+train_X.columns=label
+# df=test_X
+# initialize shap explainer
+explainer = shap.TreeExplainer(model,train_X)
+shap_values = explainer(train_X)
+# Sum_shap_value = (shap_values.values).sum(axis=1)
+plt.figure(figsize=(8,12))
+# # plot feature importances
+plt.rcParams['font.size']=13
+plt.rcParams['font.serif']='Times New Roman'
+plt.rcParams['font.style']='normal'
+fig,(ax1,ax2) = plt.subplots(1, 2,figsize = (12,8))
+
+# shap.decision_plot(explainer.expected_value,explainer.shap_values(train_X),ignore_warnings=True)
+shap.summary_plot(shap_values, train_X, plot_type='bar',max_display=20 ,sort = True)
+figure=plt.gcf()
+figure.savefig(r"D:\2023-deep learning-ERP\Result_0518\SHAP bar.png",dpi=1200)
+plt.show()
+shap.summary_plot(shap_values, train_X, plot_type='dot',max_display=20 ,sort = True)
+figure=plt.gcf()
+figure.savefig(r"D:\2023-deep learning-ERP\Result_0518\SHAP dot.png",dpi=1200)
+plt.show()
+# # shap.plots.heatmap(shap_values, max_display=20, instance_order=shap_values.sum(1))
+# plt.title('Top 20 Feature Importances')
+# plt.tight_layout()
+# figure=plt.gcf()
+# figure.savefig(r"D:\2023-deep learning-ERP\Model 4\SHAP results_bar.png",dpi=1200)
+# plt.show()
+# shap.waterfall_plot(shap_values[0], max_display=10, show=True)
+# shap.group_difference_plot(shap_values, group_mask=test_y)
+# values=shap_values.values
+values= shap_values.values
+df = pd.DataFrame(values,columns = label)
+df.to_excel(r"D:\2023-deep learning-ERP\Result_0518\Shap_value_train_X.xlsx")
+values = pd.read_excel(r"D:\2023-deep learning-ERP\Result_0518\Shap_value_train_X.xlsx").iloc[:,1:]
+
+values_data = abs(np.array(values))
+values_data = np.array(values)
+values_data = values_data.mean(axis=0)
+values_data = values_data.reshape(4,4,40)
+
+#[oscillation,channel,time]
+values_data = np.transpose(values_data,[1,0,2])
+with open(r"D:\2023-deep learning-ERP\Result_0518\All_SHAP_value.pkl",'wb') as f:
+    pickle.dump(values_data,f)
+#[channel,oscillation,time]
+times = np.arange(0,4000,100)  # change unit to ms
+Channel = ['F3','F4','F7','F8']
+Oscillation = ['Delta','Theta','Alpha','Beta','Gamma']
+plt.figure(figsize=(16,8))
+for i in range(4):
+    plt.subplot(221+i)
+    plt.title(Channel[i])
+    for j in range(4):
+        plt.plot(times,values_data[i,j,:],label = Oscillation[j])
+        plt.ylabel('SHAP value')
+    plt.legend(loc=(0,0.6))
+    plt.ylim(-0.03,0.03)
+figure=plt.gcf()
+figure.savefig(r"D:\2023-deep learning-ERP\Result_0518\Pic.png",dpi=1200)
+plt.show()   
+
+#筛选SHAP前20的正向预测特征和前20负向预测特征
+k = 20
+c = values_data.copy().reshape(-1)
+values_k = np.zeros(c.shape)
+values_k[c.argsort()[-k:]] = 1
+values_last_k = np.zeros(c.shape)
+values_last_k[c.argsort()[:k]] = 1
+
+values_k = values_k.reshape(4,4,40)
+values_last_k = values_last_k.reshape(4,4,40)
+#define subplots
+plt.rcParams['figure.dpi'] = 100  # 图形分辨率
+sns.set_theme(style='darkgrid')  # 图形主题
+sns.set(font_scale=1.5)
+fig, ax = plt.subplots(2,2, sharex=True, sharey=True, figsize=(10,8))
+plt.rcParams['font.size'] = 20
+axs = [ax[0,0],ax[0,1],ax[1,0],ax[1,1]]
+color = ['tomato','chartreuse','turquoise','fuchsia']
+for i in range(4):
+    fig = axs[i]
+    for j in range(4):
+        fig.plot(times,values_k[i,j,:]*(j+1),'o',markersize=15,color = color[j])
+        fig.plot(times,values_last_k[i,j,:]*(j+1),'x',markersize=15,color = color[j])
+        # plt.legend()
+        fig.set_title("{} Channel".format(Channel[i],k))
+        # fig.set_ylabel('Oscillation Band')
+        fig.set_xlabel('Time (ms)')
+    plt.xlim(0,4000)
+    plt.ylim(0.5,5)
+    plt.yticks([1,2,3,4],['Delta','Theta','Alpha','Beta'])
+plt.subplots_adjust(bottom=0.1,top=0.95,hspace = 0.2,wspace = 0.2)
+figure=plt.gcf()
+figure.savefig(r"D:\2023-deep learning-ERP\Result_0518\Values_Train_离散_前{}.png".format(k),dpi=1200)
+plt.show()
+Positive_index=[]
+Negative_index=[]
+for x in range(4):
+    for y in range(4): 
+        for z in range(20):
+            if values_k[x,y,z]==1:
+                Positive_index.append("{}-{}-{}".format(Channel[x],times[z],Oscillation[y]))
+            if values_last_k[x,y,z]==1:
+                Negative_index.append("{}-{}-{}".format(Channel[x],times[z],Oscillation[y]))
+       
+with open(r"D:\2023-deep learning-ERP\Result_0518\Positive_top_{}.txt".format(k),'w') as f:
+    for i in Positive_index:
+        f.writelines(i+'\n')
+with open(r"D:\2023-deep learning-ERP\Result_0518\Negative_top_{}.txt".format(k),'w') as f:
+    for i in Negative_index:
+        f.writelines(i+'\n')
+        
